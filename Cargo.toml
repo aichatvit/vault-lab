@@ -1,0 +1,18 @@
+[package]
+name = "vault-lab"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+
+[dependencies]
+crypto = { path = "vendor/crypto" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+fuser = { version = "0.16", default-features = false, features = ["abi-7-31"] }
+libc = "0.2"
+getrandom = "0.3"
+rpassword = "7"
+zeroize = "1"
+subtle = "2"
+hex = "0.4"
+tempfile = "3"
