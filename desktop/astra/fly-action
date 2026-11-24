@@ -1,0 +1,172 @@
+#!/usr/bin/python3 -I
+"""Fly-fm actions for a local container. The sudo child only runs installed tools."""
+import fcntl
+import hashlib
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+
+INSTALL = Path("/usr/local/libexec/vault-lab")
+RUNTIME = Path("/run/vault-lab")
+
+
+def session_dir(storage, uid):
+    digest = hashlib.sha256(os.fsencode(storage)).hexdigest()
+    return RUNTIME / ("{}-{}".format(uid, digest))
+
+
+def mount_type(point):
+    # The generated path is ASCII and contains no mountinfo escape characters.
+    found = []
+    with open("/proc/self/mountinfo", "rb") as mounts:
+        for line in mounts:
+            before, after = line.split(b" - ", 1)
+            if before.split()[4] == os.fsencode(point):
+                if found:
+                    return [b"stacked", b""]
+                found = after.split()[:2]
+    return found
+
+
+def is_vault(point):
+    fields = mount_type(point)
+    return bool(fields and fields[0].split(b".")[0] == b"fuse" and fields[1] == b"vault-lab")
+
+
+def wait_child(child):
+    while True:
+        try:
+            return child.wait()
+        except KeyboardInterrupt:
+            # The foreground sudo/vault process receives the terminal signal too.
+            continue
+
+
+def mount(storage, directory):
+    # /run is root-owned. The invoking desktop only needs traversal permission.
+    for path in (directory.parent, directory):
+        path.mkdir(mode=0o711, exist_ok=True)
+        info = path.lstat()
+        if path.is_symlink() or info.st_uid != 0 or info.st_mode & 0o022:
+            raise RuntimeError("Недоверенный каталог сеанса: {}".format(path))
+        path.chmod(0o711)
+    fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("Сеанс этого контейнера уже открыт или завершается.")
+        # A crashed supervisor can leave the previous FUSE mount attached.
+        try:
+            with (directory / "active").open() as previous:
+                if mount_type(active_point(directory, previous)):
+                    raise RuntimeError("Предыдущая папка ещё смонтирована. Сначала размонтируйте её.")
+        except FileNotFoundError:
+            pass
+        point = Path(tempfile.mkdtemp(prefix="files-", dir=str(directory)))
+        point.chmod(0o555)
+        # Each invocation has a distinct mountpoint and status inode. A second
+        # invocation cannot inherit an earlier unmount request or its result.
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=str(directory), delete=False) as state:
+                fcntl.flock(state, fcntl.LOCK_EX)
+                state.write(point.name + "\n")
+                state.flush()
+                os.fchmod(state.fileno(), 0o644)
+                os.replace(state.name, str(directory / "active"))
+                code = 1
+                try:
+                    print("Папка сеанса — {}".format(point), flush=True)
+                    child = subprocess.Popen([str(INSTALL / "vault-lab"), "--plugin",
+                                              str(INSTALL / "libaldcrypto.so"), "mount",
+                                              "--", str(storage), str(point)])
+                    code = wait_child(child)
+                finally:
+                    state.write(str(code) + "\n")
+                    state.flush()
+                return code
+        finally:
+            if not mount_type(point):
+                point.rmdir()
+    finally:
+        os.close(fd)
+
+
+def active_point(directory, state):
+    name = state.readline().strip()
+    if not name.startswith("files-") or Path(name).name != name:
+        raise RuntimeError("Не удалось определить папку сеанса.")
+    return directory / name
+
+
+def unmount(directory):
+    try:
+        state = (directory / "active").open()
+    except FileNotFoundError:
+        raise RuntimeError("Для этого контейнера нет сеанса Fly.")
+    with state:
+        point = active_point(directory, state)
+        if not is_vault(point):
+            raise RuntimeError("Контейнер ещё не смонтирован или уже размонтирован.")
+        subprocess.run(["/bin/umount", "--", str(point)], check=True)
+        print("Папка размонтирована. Ожидание упаковки контейнера…", flush=True)
+        fcntl.flock(state, fcntl.LOCK_SH)
+        if state.readline().strip() != "0":
+            raise RuntimeError("Успешная упаковка не подтверждена. Подробности в окне монтирования.")
+        print("Контейнер упакован.", flush=True)
+        return 0
+
+
+def open_when_ready(directory, child):
+    while child.poll() is None:
+        try:
+            with (directory / "active").open() as state:
+                point = active_point(directory, state)
+        except FileNotFoundError:
+            time.sleep(0.25)
+            continue
+        if is_vault(point):
+            subprocess.Popen(["/usr/bin/fly-fm", str(point)], start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            return
+        time.sleep(0.25)
+
+
+def run(args):
+    if len(args) != 2 or args[0] not in ("mount", "unmount", "serve-mount", "serve-unmount"):
+        raise RuntimeError("Использование: fly-action mount|unmount ФАЙЛ")
+    action, filename = args
+    storage = Path(filename).resolve(strict=True)
+    if not storage.is_file():
+        raise RuntimeError("Выберите файл контейнера S-Box.")
+    if action.startswith("serve-"):
+        if os.geteuid() != 0:
+            raise RuntimeError("Для операции требуются права администратора.")
+        directory = session_dir(storage, int(os.environ.get("SUDO_UID", "0")))
+        return mount(storage, directory) if action == "serve-mount" else unmount(directory)
+    child = subprocess.Popen(["/usr/bin/sudo", "--", str(INSTALL / "fly-action"),
+                              "serve-" + action, str(storage)])
+    if action == "mount":
+        try:
+            open_when_ready(session_dir(storage, os.getuid()), child)
+        except (KeyboardInterrupt, OSError) as error:
+            print("Автооткрытие папки прервано.", error, file=sys.stderr)
+    return wait_child(child)
+
+
+if __name__ == "__main__":
+    try:
+        status = run(sys.argv[1:])
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+        print(error, file=sys.stderr)
+        status = 1
+    if sys.argv[1:2] in (["mount"], ["unmount"]) and (status or sys.argv[1] == "unmount"):
+        try:
+            input("Нажмите Enter, чтобы закрыть окно. ")
+        except (EOFError, KeyboardInterrupt):
+            pass
+    sys.exit(status)

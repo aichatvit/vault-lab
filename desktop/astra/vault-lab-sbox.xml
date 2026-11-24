@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-vault-lab-sbox">
+    <comment>S-Box encrypted container</comment>
+    <comment xml:lang="ru">Зашифрованный контейнер S-Box</comment>
+    <glob pattern="*.sbox"/>
+    <magic priority="80"><match type="string" offset="0" value="VLAGOST2"/></magic>
+  </mime-type>
+</mime-info>

@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Name=S-Box
+Icon=drive-harddisk
+MimeType=application/x-vault-lab-sbox;
+Actions=Mount;Unmount;
+
+[Desktop Action Mount]
+Name=Mount S-Box
+Name[ru]=Монтировать S-Box
+Icon=drive-harddisk
+Exec=/usr/bin/x-terminal-emulator -e /usr/local/libexec/vault-lab/fly-action mount %f
+
+[Desktop Action Unmount]
+Name=Unmount S-Box
+Name[ru]=Размонтировать S-Box
+Icon=media-eject
+Exec=/usr/bin/x-terminal-emulator -e /usr/local/libexec/vault-lab/fly-action unmount %f

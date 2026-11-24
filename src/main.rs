@@ -1,14 +1,27 @@
 mod cipher;
 mod format;
+#[cfg(target_os = "linux")]
 mod fs;
+#[cfg(target_os = "linux")]
 mod probe;
+#[cfg(target_os = "linux")]
 mod safe_path;
+#[cfg(target_os = "linux")]
 mod session;
+#[cfg(target_os = "linux")]
 mod store;
+#[cfg(windows)]
+mod windows;
+#[cfg(all(test, target_os = "linux"))]
+#[path = "windows/archive.rs"]
+mod windows_archive_tests;
 use anyhow::{Result, ensure};
+#[cfg(target_os = "linux")]
 use clap::{Parser, Subcommand};
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 use zeroize::Zeroizing;
+#[cfg(target_os = "linux")]
 #[derive(Parser)]
 #[command(
     version,
@@ -23,6 +36,7 @@ struct Args {
     #[command(subcommand)]
     command: Action,
 }
+#[cfg(target_os = "linux")]
 #[derive(Subcommand)]
 enum Action {
     /// Generate a random 32-byte raw key. Prints the secret once; do not log it.
@@ -74,6 +88,7 @@ fn key() -> Result<Zeroizing<Vec<u8>>> {
     hex::decode_to_slice(text.as_bytes(), &mut key[..])?;
     Ok(key)
 }
+#[cfg(target_os = "linux")]
 fn harden() -> Result<()> {
     let limit = libc::rlimit {
         rlim_cur: 0,
@@ -89,6 +104,7 @@ fn harden() -> Result<()> {
     );
     Ok(())
 }
+#[cfg(target_os = "linux")]
 fn run() -> Result<()> {
     let args = Args::parse();
     harden()?;
@@ -166,6 +182,7 @@ fn run() -> Result<()> {
     }
     Ok(())
 }
+#[cfg(target_os = "linux")]
 fn display_size(bytes: u64) -> String {
     let (unit, scale, precision) = if bytes >= 1_000_000_000 {
         ("GB", 1_000_000_000, 9)
@@ -180,6 +197,9 @@ fn display_size(bytes: u64) -> String {
         format!("{}.{fraction} {unit}", bytes / scale)
     }
 }
+
+#[cfg(windows)]
+use windows::run;
 
 fn main() {
     if let Err(e) = run() {

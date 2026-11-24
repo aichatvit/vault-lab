@@ -1,5 +1,9 @@
 # Справочник команд
 
+В Windows доступны `mount FILE` и `unmount FILE`. Путь рабочей папки выбирает провайдер. [Команды PowerShell](WINDOWS.md#работа-в-powershell)
+
+## Linux
+
 Команды выполняются из корня распакованного проекта после `cargo build --locked`.
 Синтаксис: `./target/debug/vault-lab [--plugin PATH] COMMAND`.
 Глобальный параметр `--plugin` по умолчанию равен `lib/libaldcrypto.so`.

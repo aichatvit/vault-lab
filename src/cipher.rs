@@ -9,11 +9,13 @@ use crypto::wrappers::{
     library::Library,
     symmetric::{Symmetric, SymmetricMode},
 };
+use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::{
     cell::OnceCell,
     fs::File,
     os::fd::AsRawFd,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -32,11 +34,14 @@ pub fn random<const N: usize>() -> Result<[u8; N]> {
 
 pub struct Cipher {
     ctx: Option<BaseCrypt>,
+    #[cfg(target_os = "linux")]
     plugin: Option<Arc<File>>,
+    #[cfg(target_os = "linux")]
     worker: OnceCell<Option<SealWorker>>,
 }
 impl Cipher {
     pub fn load(path: &Path) -> Result<Self> {
+        #[cfg(target_os = "linux")]
         let module = Arc::new(File::open(path)?);
         // SAFETY: operator explicitly supplies a trusted native plugin with matching ABI.
         let lib = unsafe { Library::load(path) }?;
@@ -45,7 +50,9 @@ impl Cipher {
                 Ok(ctx) => {
                     return Ok(Self {
                         ctx: Some(ctx),
+                        #[cfg(target_os = "linux")]
                         plugin: Some(module),
+                        #[cfg(target_os = "linux")]
                         worker: OnceCell::new(),
                     });
                 }
@@ -58,6 +65,7 @@ impl Cipher {
         }
         bail!("Plugin rejected 16 initialization seeds")
     }
+    #[cfg(target_os = "linux")]
     pub fn benchmark_xor() -> Self {
         Self {
             ctx: None,
@@ -66,6 +74,7 @@ impl Cipher {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn prepare_worker(&self) {
         self.worker.get_or_init(|| {
             self.plugin
@@ -75,6 +84,7 @@ impl Cipher {
     }
 
     // Each native context is created, used and destroyed by its own thread.
+    #[cfg(target_os = "linux")]
     pub fn seal_async(
         &self,
         keys: &[u8],
@@ -115,6 +125,7 @@ impl Cipher {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn workspace_magic(&self) -> &'static [u8; 8] {
         if self.ctx.is_some() {
             b"VLAWORK2"
@@ -258,6 +269,7 @@ impl Cipher {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct SealJob {
     keys: Zeroizing<Vec<u8>>,
     context: [u8; 48],
@@ -265,12 +277,14 @@ struct SealJob {
     reply: mpsc::Sender<Result<Vec<u8>>>,
 }
 
+#[cfg(target_os = "linux")]
 struct SealWorker {
     ready: Arc<AtomicBool>,
     jobs: Option<mpsc::SyncSender<SealJob>>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
+#[cfg(target_os = "linux")]
 impl SealWorker {
     fn start(module: Arc<File>) -> Option<Self> {
         let (jobs, queue) = mpsc::sync_channel::<SealJob>(1);
@@ -305,6 +319,7 @@ impl SealWorker {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for SealWorker {
     fn drop(&mut self) {
         self.jobs.take();
@@ -324,7 +339,7 @@ fn benchmark_xor(data: &mut [u8], keys: &[u8], iv: &[u8]) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     fn cipher() -> Cipher {

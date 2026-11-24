@@ -1,4 +1,6 @@
-use crate::cipher::{Cipher, random};
+use crate::cipher::Cipher;
+#[cfg(any(target_os = "linux", test))]
+use crate::cipher::random;
 use anyhow::{Result, ensure};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -214,6 +216,7 @@ pub struct Container {
 }
 
 impl Container {
+    #[cfg(any(target_os = "linux", test))]
     pub fn new(cipher: &Cipher, key: &[u8]) -> Result<Self> {
         let id = random()?;
         let keys = cipher.derive(key, b"vault-lab/v2/index", &id)?;
