@@ -1,0 +1,19 @@
+[package]
+name = "crypto"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+description = "Обёртки с управлением ресурсами и динамические привязки к криптоплагину компании"
+publish = false
+build = "build.rs"
+
+[dependencies]
+libloading = "0.8"
+zeroize = "1"
+
+[build-dependencies]
+bindgen = "0.72"
+
+[dev-dependencies]
+getrandom = "0.3"
+static_assertions = "1"
