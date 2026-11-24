@@ -1,13 +1,15 @@
 mod archive;
 mod cloud;
 mod pack;
+mod sidebar;
+mod staging;
 
 use self::{archive::Archive, pack::Snapshot};
 use crate::{
     cipher::{Cipher, random},
     format::Container,
 };
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
 use std::{
@@ -40,8 +42,22 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Action {
-    Mount { storage: PathBuf },
-    Unmount { storage: PathBuf },
+    /// Create an encrypted S-Box and show its new master key.
+    Create {
+        #[arg(required_unless_present = "in_folder", conflicts_with = "in_folder")]
+        storage: Option<PathBuf>,
+        /// Ask for the file name in this folder (Explorer action).
+        #[arg(long)]
+        in_folder: Option<PathBuf>,
+        #[arg(long, default_value_t = 1)]
+        quota_gb: u64,
+    },
+    Mount {
+        storage: PathBuf,
+    },
+    Unmount {
+        storage: PathBuf,
+    },
 }
 
 fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
@@ -98,6 +114,7 @@ fn unmount(state: &Path) -> Result<()> {
 }
 
 fn finish_cleanup(state: &Path, view: &Path) -> Result<()> {
+    sidebar::remove(state)?;
     if view.try_exists()? {
         ensure!(
             fs::read_dir(view)?.next().is_none(),
@@ -108,7 +125,15 @@ fn finish_cleanup(state: &Path, view: &Path) -> Result<()> {
         fs::remove_dir(view)?;
     }
     // Remove the phase marker last so an interrupted cleanup remains repeatable.
-    for name in ["endpoint", "ready", "closing", "base.sbox", "retiring"] {
+    for name in [
+        "sidebar-name",
+        "sidebar.lnk",
+        "endpoint",
+        "ready",
+        "closing",
+        "base.sbox",
+        "retiring",
+    ] {
         match fs::remove_file(state.join(name)) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
             result => result?,
@@ -200,6 +225,10 @@ fn mount(
         }
         write_state(&ready, &archive.container.revision)?;
     }
+    if !committed {
+        sidebar::publish(storage, state, &view)
+            .context("Не удалось создать ярлык контейнера в панели S-Box")?;
+    }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let token = hex::encode(random::<32>()?);
     write_state(
@@ -222,20 +251,37 @@ fn mount(
         }
     }
     let mut original_id = file_id(&original)?;
-    for client in listener.incoming() {
-        let mut client = client?;
+    let mut staging = staging::Staging::new(state, archive.tree.next);
+    let mut changes = (!committed).then(|| staging::Changes::new(&view));
+    listener.set_nonblocking(true)?;
+    loop {
+        let mut client = match listener.accept() {
+            Ok((client, _)) => client,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if let Some(watch) = changes.as_mut() {
+                    if watch.due() {
+                        watch.scanned(staging.scan(&view, &archive, &cipher));
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        };
+        client.set_nonblocking(false)?;
         client.set_read_timeout(Some(Duration::from_secs(3)))?;
         let mut provided = [0; 64];
         if client.read_exact(&mut provided).is_err() || provided != token.as_bytes() {
             continue;
         }
+        drop(changes.take());
         let close = (|| -> Result<()> {
             let at_path = File::open(storage)?;
             ensure!(
                 file_id(&at_path)? == original_id,
                 "Container replaced by another application"
             );
-            let mut snapshot = Snapshot::capture(&view, archive.tree.quota)?;
+            let snapshot = Snapshot::capture(&view, archive.tree.quota)?;
             if committed {
                 let saved = Archive::open(
                     storage.to_owned(),
@@ -245,7 +291,7 @@ fn mount(
                 )?;
                 snapshot.verify_remaining(&view, &saved)?;
             } else {
-                let (temp, new) = snapshot.pack(&archive, &cipher, storage)?;
+                let (temp, new) = snapshot.pack(&archive, &cipher, storage, &mut staging)?;
                 let temp = temp.into_temp_path();
                 write_state(&closing, &new.revision)?;
                 ensure!(
@@ -282,6 +328,7 @@ fn mount(
             write_state(&retiring, &fs::read(&closing)?)
         })();
         if let Err(e) = close {
+            changes = (!committed).then(|| staging::Changes::new(&view));
             let msg = format!("{e:#}\nWorking directory: {}", view.display());
             eprintln!("{msg}");
             let _ = client.write_all(msg.as_bytes());
@@ -303,47 +350,113 @@ fn mount(
         let _ = client.write_all(b"OK");
         return Ok(());
     }
-    bail!("Session listener stopped")
+}
+
+fn plugin_path(plugin: Option<PathBuf>) -> Result<PathBuf> {
+    let path = match plugin {
+        Some(path) => path,
+        None => std::env::current_exe()?.with_file_name("aldcrypto.dll"),
+    };
+    fs::canonicalize(path).context("Cannot locate the Windows crypto DLL")
+}
+
+fn session_location(path: &Path) -> Result<(PathBuf, PathBuf)> {
+    let storage = fs::canonicalize(path)?;
+    let mut hash = Sha256::new();
+    for ch in storage.as_os_str().encode_wide() {
+        hash.update(ch.to_le_bytes());
+    }
+    let state = PathBuf::from(std::env::var_os("LOCALAPPDATA").context("Missing LOCALAPPDATA")?)
+        .join("VaultLab")
+        .join("sessions")
+        .join(hex::encode(hash.finalize()));
+    Ok((storage, state))
+}
+
+fn create(
+    storage: Option<PathBuf>,
+    folder: Option<PathBuf>,
+    quota_gb: u64,
+    plugin: PathBuf,
+) -> Result<()> {
+    let quota = quota_gb
+        .checked_mul(1_000_000_000)
+        .filter(|q| *q > 0)
+        .context("Недопустимая квота")?;
+    let mut path = if let Some(folder) = folder {
+        print!("Имя нового контейнера (например, Работа): ");
+        std::io::stdout().flush()?;
+        let mut name = String::new();
+        std::io::stdin().read_line(&mut name)?;
+        let name = name.trim_end_matches(['\r', '\n']);
+        archive::validate_name(name)?;
+        folder.join(name)
+    } else {
+        storage.context("Укажите путь к контейнеру")?
+    };
+    let name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .context("Недопустимое имя файла")?;
+    archive::validate_name(name)?;
+    if !name.to_ascii_lowercase().ends_with(".sbox") {
+        let name = format!("{name}.sbox");
+        archive::validate_name(&name)?;
+        path.set_file_name(name);
+    }
+    ensure!(
+        !path.try_exists()?,
+        "Файл уже существует: {}",
+        path.display()
+    );
+    let cipher = Cipher::load(&plugin)?;
+    let key = zeroize::Zeroizing::new(random::<32>()?);
+    let text = zeroize::Zeroizing::new(hex::encode(key.as_slice()));
+    println!(
+        "Сохраните ключ отдельно от контейнера. Вставьте его ещё раз для подтверждения.\n{}",
+        text.as_str()
+    );
+    let confirm = crate::key()?;
+    ensure!(
+        confirm.as_slice() == key.as_slice(),
+        "Ключи не совпали. Файл не создан."
+    );
+    Container::create_empty(&path, &cipher, key.as_slice(), quota)?;
+    println!("Создан контейнер {}. Квота {quota_gb} ГБ.", path.display());
+    Ok(())
 }
 
 pub fn run() -> Result<()> {
     let args = Args::parse();
     let closing = matches!(args.action, Action::Unmount { .. });
+    let creating = matches!(args.action, Action::Create { .. });
     let result = (|| -> Result<()> {
-        let path = match &args.action {
-            Action::Mount { storage } | Action::Unmount { storage } => storage,
-        };
-        let storage = fs::canonicalize(path)?;
-        // GetFinalPathNameByHandle (canonicalize) resolves relative paths and Explorer aliases.
-        let mut hash = Sha256::new();
-        for ch in storage.as_os_str().encode_wide() {
-            hash.update(ch.to_le_bytes());
-        }
-        let state =
-            PathBuf::from(std::env::var_os("LOCALAPPDATA").context("Missing LOCALAPPDATA")?)
-                .join("VaultLab")
-                .join("sessions")
-                .join(hex::encode(hash.finalize()));
         match args.action {
-            Action::Mount { .. } => {
-                let plugin = match args.plugin {
-                    Some(path) => path,
-                    None => std::env::current_exe()?.with_file_name("aldcrypto.dll"),
-                };
+            Action::Create {
+                storage,
+                in_folder,
+                quota_gb,
+            } => create(storage, in_folder, quota_gb, plugin_path(args.plugin)?),
+            Action::Mount { storage } => {
+                let (storage, state) = session_location(&storage)?;
                 mount(
                     &storage,
                     &state,
-                    fs::canonicalize(plugin).context("Cannot locate the Windows crypto DLL")?,
+                    plugin_path(args.plugin)?,
                     args.explorer,
                     crate::key()?,
                 )
             }
-            Action::Unmount { .. } => unmount(&state),
+            Action::Unmount { storage } => unmount(&session_location(&storage)?.1),
         }
     })();
     if args.explorer {
         let notice = match &result {
             Err(e) => Some((format!("{e:#}"), MB_ICONERROR)),
+            Ok(()) if creating => Some((
+                "Контейнер создан. Выберите «Монтировать S-Box» в меню файла.".into(),
+                MB_ICONINFORMATION,
+            )),
             Ok(()) if closing => Some((
                 "Контейнер сохранён и размонтирован.".into(),
                 MB_ICONINFORMATION,

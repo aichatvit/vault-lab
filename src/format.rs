@@ -1,6 +1,4 @@
-use crate::cipher::Cipher;
-#[cfg(any(target_os = "linux", test))]
-use crate::cipher::random;
+use crate::cipher::{Cipher, random};
 use anyhow::{Result, ensure};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -216,7 +214,6 @@ pub struct Container {
 }
 
 impl Container {
-    #[cfg(any(target_os = "linux", test))]
     pub fn new(cipher: &Cipher, key: &[u8]) -> Result<Self> {
         let id = random()?;
         let keys = cipher.derive(key, b"vault-lab/v2/index", &id)?;
@@ -225,6 +222,29 @@ impl Container {
             revision: random()?,
             iv: cipher.iv_size(&keys)?,
         })
+    }
+
+    #[cfg(any(windows, test))]
+    pub fn create_empty(
+        path: &std::path::Path,
+        cipher: &Cipher,
+        key: &[u8],
+        quota: u64,
+    ) -> Result<()> {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        Self::new(cipher, key)?.write_index(
+            file.as_file_mut(),
+            cipher,
+            key,
+            &Tree::empty(quota),
+        )?;
+        file.as_file().sync_all()?;
+        file.persist_noclobber(path)?;
+        Ok(())
     }
 
     pub fn read_index(file: &mut File, cipher: &Cipher, key: &[u8]) -> Result<(Self, Tree)> {
@@ -330,4 +350,28 @@ pub fn check_tag(record: &[u8], expected: &Tag) -> Result<()> {
         "Unexpected block tag"
     );
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod creation_tests {
+    use super::*;
+    #[test]
+    fn new_sbox_authenticates_and_preserves_existing_file() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let path = tmp.path().join("Работа.sbox");
+        let cipher = Cipher::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/libaldcrypto.so"),
+        )?;
+        let key = [42; 32];
+        Container::create_empty(&path, &cipher, &key, 1_000_000_000)?;
+        let bytes = std::fs::read(&path)?;
+        assert_eq!(
+            Container::read_index(&mut File::open(&path)?, &cipher, &key)?.1,
+            Tree::empty(1_000_000_000)
+        );
+        assert!(Container::read_index(&mut File::open(&path)?, &cipher, &[9; 32]).is_err());
+        assert!(Container::create_empty(&path, &cipher, &[9; 32], 1).is_err());
+        assert_eq!(std::fs::read(path)?, bytes);
+        Ok(())
+    }
 }

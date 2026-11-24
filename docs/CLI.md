@@ -1,6 +1,6 @@
 # Справочник команд
 
-В Windows доступны `mount FILE` и `unmount FILE`. Путь рабочей папки выбирает провайдер. [Команды PowerShell](WINDOWS.md#работа-в-powershell)
+В Windows доступны `create FILE [--quota-gb N]`, `mount FILE` и `unmount FILE`. Путь рабочей папки выбирает провайдер. [Команды PowerShell](WINDOWS.md#работа-в-powershell)
 
 ## Linux
 

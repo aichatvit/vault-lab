@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <?define VerbKey="Software\Classes\SystemFileAssociations\.sbox\shell\VaultLab" ?>
+  <?define CreateKey="Software\Classes\Directory\Background\shell\VaultLab.create" ?>
+  <?define SidebarId="{7EB19B7D-2E41-4BD4-BFEB-7D78E432FE2C}" ?>
+  <Product Id="$(var.ProductCode)" Name="Vault Lab S-Box" Version="$(var.Version)"
+           Language="1049" Codepage="1251" Manufacturer="Vault Lab"
+           UpgradeCode="65BA2ED4-32AD-493A-85EA-185F6177BC7C">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" SummaryCodepage="1251" Languages="1049"/>
+    <MajorUpgrade DowngradeErrorMessage="Установлена более новая версия Vault Lab S-Box."/>
+    <Media Id="1" Cabinet="VaultLab.cab" EmbedCab="yes"/>
+    <Property Id="WINDOWSBUILD">
+      <RegistrySearch Id="WindowsBuild" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber" Type="raw" Win64="yes"/>
+    </Property>
+    <Condition Message="Нужна Windows x64 с Cloud Files API (сборка 16299 или новее).">
+      Installed OR (VersionNT64 AND WINDOWSBUILD &gt;= 16299)
+    </Condition>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="VaultLabProfile" Name="VaultLab">
+          <Directory Id="SidebarFolder" Name="Containers">
+            <Component Id="ExplorerSidebar" Guid="BCB6B07C-9BD2-4577-B34A-82826603661C" Win64="yes">
+              <CreateFolder/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\CLSID\$(var.SidebarId)" Type="string" Value="S-Box" KeyPath="yes"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\CLSID\$(var.SidebarId)" Name="System.IsPinnedToNameSpaceTree" Type="integer" Value="1"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\CLSID\$(var.SidebarId)" Name="SortOrderIndex" Type="integer" Value="66"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\CLSID\$(var.SidebarId)\DefaultIcon" Type="expandable" Value="%SystemRoot%\System32\imageres.dll,-1043"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\CLSID\$(var.SidebarId)\InProcServer32" Type="expandable" Value="%SystemRoot%\System32\shell32.dll"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\CLSID\$(var.SidebarId)\Instance" Name="CLSID" Type="string" Value="{0E5AAE11-A475-4C5B-AB00-C66DE400274E}"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\CLSID\$(var.SidebarId)\Instance\InitPropertyBag" Name="Attributes" Type="integer" Value="17"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\CLSID\$(var.SidebarId)\Instance\InitPropertyBag" Name="TargetFolderPath" Type="expandable" Value="%LOCALAPPDATA%\VaultLab\Containers"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\CLSID\$(var.SidebarId)\ShellFolder" Name="FolderValueFlags" Type="integer" Value="40"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\CLSID\$(var.SidebarId)\ShellFolder" Name="Attributes" Type="integer" Value="-260046771"/>
+              <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\$(var.SidebarId)" Type="string" Value="S-Box"/>
+              <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" Name="$(var.SidebarId)" Type="integer" Value="1"/>
+              <RemoveFolder Id="RemoveEmptySidebarFolder" On="uninstall"/>
+            </Component>
+          </Directory>
+        </Directory>
+        <Directory Id="UserPrograms" Name="Programs">
+          <Directory Id="INSTALLFOLDER" Name="VaultLab">
+            <Component Id="VaultLabClient" Guid="BF126524-B2F9-44AB-B692-88C6017D6FD4" Win64="yes">
+              <File Id="VaultExe" Name="vault-lab.exe" Source="vault-lab.exe"/>
+              <File Id="CryptoDll" Name="aldcrypto.dll" Source="aldcrypto.dll"/>
+              <File Id="UserGuide" Name="S-Box.txt" Source="S-Box.txt"/>
+              <RegistryValue Root="HKCU" Key="Software\VaultLab\SBox" Name="Version"
+                             Type="string" Value="[ProductVersion]" KeyPath="yes"/>
+              <RegistryValue Root="HKCU" Key="$(var.VerbKey).mount" Name="MUIVerb" Type="string" Value="Монтировать S-Box"/>
+              <RegistryValue Root="HKCU" Key="$(var.VerbKey).mount" Name="MultiSelectModel" Type="string" Value="Single"/>
+              <RegistryValue Root="HKCU" Key="$(var.VerbKey).mount" Name="Icon" Type="string" Value="&quot;[#VaultExe]&quot;,0"/>
+              <RegistryValue Root="HKCU" Key="$(var.VerbKey).mount\command" Type="string" Value="&quot;[#VaultExe]&quot; --explorer --plugin &quot;[#CryptoDll]&quot; mount -- &quot;%1&quot;"/>
+              <RegistryValue Root="HKCU" Key="$(var.VerbKey).unmount" Name="MUIVerb" Type="string" Value="Размонтировать S-Box"/>
+              <RegistryValue Root="HKCU" Key="$(var.VerbKey).unmount" Name="MultiSelectModel" Type="string" Value="Single"/>
+              <RegistryValue Root="HKCU" Key="$(var.VerbKey).unmount" Name="Icon" Type="string" Value="&quot;[#VaultExe]&quot;,0"/>
+              <RegistryValue Root="HKCU" Key="$(var.VerbKey).unmount\command" Type="string" Value="&quot;[#VaultExe]&quot; --explorer --plugin &quot;[#CryptoDll]&quot; unmount -- &quot;%1&quot;"/>
+              <RegistryValue Root="HKCU" Key="$(var.CreateKey)" Name="MUIVerb" Type="string" Value="Создать контейнер S-Box"/>
+              <RegistryValue Root="HKCU" Key="$(var.CreateKey)" Name="Icon" Type="string" Value="&quot;[#VaultExe]&quot;,0"/>
+              <RegistryValue Root="HKCU" Key="$(var.CreateKey)\command" Type="string" Value="&quot;[#VaultExe]&quot; --explorer --plugin &quot;[#CryptoDll]&quot; create --in-folder &quot;%V\.&quot;"/>
+              <RemoveFolder Id="RemoveInstallFolder" On="uninstall"/>
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id="Complete" Title="Vault Lab S-Box" Level="1">
+      <ComponentRef Id="VaultLabClient"/>
+      <ComponentRef Id="ExplorerSidebar"/>
+    </Feature>
+  </Product>
+</Wix>

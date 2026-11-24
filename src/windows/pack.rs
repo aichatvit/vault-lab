@@ -1,14 +1,18 @@
 //! Hold each object against writes and renames until the replacement is durable.
-use super::{Archive, wide};
+use super::{
+    Archive,
+    staging::{Staging, attributes, clean_id},
+    wide,
+};
 use crate::{
     cipher::{Cipher, random},
     format::{BLOCK, Container, Node, Tree},
 };
 use anyhow::{Context, Result, ensure};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, Write},
+    io::Read,
     os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
     path::{Path, PathBuf},
     ptr,
@@ -16,13 +20,14 @@ use std::{
 use tempfile::NamedTempFile;
 use windows_sys::Win32::{
     Foundation::{ERROR_HANDLE_EOF, INVALID_HANDLE_VALUE},
-    Storage::{CloudFilters::*, FileSystem::*},
+    Storage::FileSystem::*,
 };
 use zeroize::Zeroizing;
 
 struct Entry {
     path: PathBuf,
     guard: File,
+    baseline: Option<u64>,
     dir: bool,
     children: BTreeSet<std::ffi::OsString>,
 }
@@ -91,30 +96,13 @@ impl Snapshot {
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
                 .open(&path)
                 .with_context(|| format!("Close applications using {}", path.display()))?;
-            let mut tag = FILE_ATTRIBUTE_TAG_INFO::default();
-            if unsafe {
-                GetFileInformationByHandleEx(
-                    guard.as_raw_handle(),
-                    FileAttributeTagInfo,
-                    (&mut tag as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
-                    size_of_val(&tag) as u32,
-                )
-            } == 0
-            {
-                return Err(std::io::Error::last_os_error().into());
-            }
-            let state = unsafe {
-                CfGetPlaceholderStateFromAttributeTag(tag.FileAttributes, tag.ReparseTag)
+            let (dir, placeholder) = attributes(&guard, id == 1)
+                .with_context(|| format!("Checking {}", path.display()))?;
+            let baseline = if placeholder && !dir {
+                clean_id(&guard)
+            } else {
+                None
             };
-            ensure!(
-                tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
-                    || (state != CF_PLACEHOLDER_STATE_INVALID
-                        && (state & CF_PLACEHOLDER_STATE_PLACEHOLDER != 0
-                            || (id == 1 && state & CF_PLACEHOLDER_STATE_SYNC_ROOT != 0))),
-                "Unsupported reparse point {}",
-                path.display()
-            );
-            let dir = tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
             let meta = guard.metadata()?;
             let node = tree.nodes.get_mut(&id).unwrap();
             node.dir = dir;
@@ -145,6 +133,7 @@ impl Snapshot {
                 Entry {
                     path,
                     guard,
+                    baseline,
                     dir,
                     children,
                 },
@@ -173,40 +162,63 @@ impl Snapshot {
     }
 
     pub fn pack(
-        &mut self,
+        &self,
         archive: &Archive,
         cipher: &Cipher,
         destination: &Path,
+        staging: &mut Staging,
     ) -> Result<(NamedTempFile, Container)> {
         let parent = destination.parent().context("Invalid container location")?;
-        let mut payload = tempfile::tempfile_in(parent)?;
         let container = Container {
             revision: random()?,
             ..archive.container
         };
+        let mut tree = Tree::empty(self.tree.quota);
+        let mut directories = BTreeMap::from([(1, 1)]);
+        // None selects the authenticated baseline. Other payloads are complete staged files.
+        let mut sources = BTreeMap::new();
         let mut buf = Zeroizing::new(vec![0; BLOCK as usize]);
-        for ((&id, node), entry) in self.tree.nodes.iter_mut().zip(&self.entries) {
-            if node.dir {
-                continue;
-            }
-            let mut input = OpenOptions::new()
-                .read(true)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
-                .open(&entry.path)?;
-            let keys = container.file_keys(cipher, &archive.key, id)?;
-            for block in 0..node.size.div_ceil(BLOCK) {
-                let n = crate::format::block_len(node.size, block);
-                input.read_exact(&mut buf[..n])?;
-                let record =
-                    cipher.seal(&keys, &container.block_context(id, block, n), &buf[..n])?;
-                node.tags.push(record[record.len() - 32..].try_into()?);
-                payload.write_all(&record)?;
+        for ((&temporary_id, template), entry) in self.tree.nodes.iter().zip(&self.entries).skip(1)
+        {
+            let mut node = template.clone();
+            node.parent = directories[&node.parent];
+            let id = if node.dir {
+                let id = staging.allocate()?;
+                directories.insert(temporary_id, id);
+                id
+            } else if let Some(id) = entry.baseline.filter(|id| {
+                !sources.contains_key(id)
+                    && archive
+                        .tree
+                        .nodes
+                        .get(id)
+                        .is_some_and(|old| !old.dir && old.size == node.size)
+            }) {
+                node.tags.clone_from(&archive.tree.nodes[&id].tags);
+                sources.insert(id, None);
+                id
+            } else {
+                let file = staging
+                    .verified(&entry.path, archive, cipher, &mut buf)
+                    .with_context(|| format!("Preparing {}", entry.path.display()))?;
+                node.tags.clone_from(&file.tags);
+                sources.insert(file.id, Some(&entry.path));
+                file.id
+            };
+            tree.nodes.insert(id, node);
+        }
+        tree.next = staging.next;
+        let mut out = NamedTempFile::new_in(parent)?;
+        container.write_index(out.as_file_mut(), cipher, &archive.key, &tree)?;
+        let mut base = File::open(&archive.baseline)?;
+        let mut record = Vec::new();
+        for (id, source) in sources {
+            if let Some(path) = source {
+                staging.copy_to(path, out.as_file_mut(), &mut buf)?;
+            } else {
+                archive.copy_records(id, &mut base, out.as_file_mut(), cipher, &mut record)?;
             }
         }
-        let mut out = NamedTempFile::new_in(parent)?;
-        container.write_index(out.as_file_mut(), cipher, &archive.key, &self.tree)?;
-        payload.rewind()?;
-        std::io::copy(&mut payload, &mut out)?;
         out.as_file().sync_all()?;
         self.check_directories()?;
         Ok((out, container))

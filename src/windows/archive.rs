@@ -79,6 +79,30 @@ impl Archive {
         Ok(())
     }
 
+    pub fn copy_records(
+        &self,
+        id: u64,
+        base: &mut File,
+        out: &mut File,
+        cipher: &Cipher,
+        record: &mut Vec<u8>,
+    ) -> Result<()> {
+        use std::io::Write;
+        let node = &self.tree.nodes[&id];
+        let keys = self.container.file_keys(cipher, &self.key, id)?;
+        base.seek(SeekFrom::Start(self.offsets[&id]))?;
+        for (block, tag) in node.tags.iter().enumerate() {
+            let block = block as u64;
+            let n = block_len(node.size, block);
+            record.resize(self.container.record_len(n), 0);
+            base.read_exact(record)?;
+            check_tag(record, tag)?;
+            cipher.authenticate(&keys, &self.container.block_context(id, block, n), record)?;
+            out.write_all(record)?;
+        }
+        Ok(())
+    }
+
     pub fn read_range(
         &self,
         id: u64,
@@ -199,6 +223,18 @@ mod tests {
         container.write_index(file.as_file_mut(), &cipher, &key, &tree)?;
         file.write_all(&payload)?;
         let archive = Archive::open(file.path().to_owned(), plugin, key, &cipher)?;
+        let mut copy = tempfile::tempfile()?;
+        archive.copy_records(
+            2,
+            &mut File::open(file.path())?,
+            &mut copy,
+            &cipher,
+            &mut Vec::new(),
+        )?;
+        copy.rewind()?;
+        let mut copied = Vec::new();
+        copy.read_to_end(&mut copied)?;
+        assert_eq!(copied, payload);
         let start = BLOCK / 4096 * 4096;
         let mut received = 0;
         archive.read_range(2, start, tree.quota - start, |pos, bytes| {
@@ -213,6 +249,23 @@ mod tests {
         assert!(
             archive
                 .read_range(2, start, 4096, |_, _| panic!("damaged data delivered"))
+                .is_err()
+        );
+        // Corrupt only ciphertext, leaving both the stored and index tags intact.
+        let last_block = archive.offsets[&2] + container.file_len(BLOCK);
+        file.seek(SeekFrom::End(-1))?;
+        file.write_all(&[*payload.last().unwrap()])?;
+        file.seek(SeekFrom::Start(last_block))?;
+        file.write_all(&[payload[container.file_len(BLOCK) as usize] ^ 1])?;
+        assert!(
+            archive
+                .copy_records(
+                    2,
+                    &mut File::open(file.path())?,
+                    &mut copy,
+                    &cipher,
+                    &mut Vec::new()
+                )
                 .is_err()
         );
         Ok(())
